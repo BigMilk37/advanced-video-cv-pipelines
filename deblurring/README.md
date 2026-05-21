@@ -1,50 +1,65 @@
-# Neural Video Restoration: High-Frequency Motion Deblurring
+# Neural Video Restoration: High-Frequency Motion Deblurring & Computational Profiling
 
-A deep learning framework designed to restore sharp video sequences from blurred frame streams caused by sudden camera manipulation, high-frequency motion artifacts, or slow exposure fluctuations. This repository implements a multi-frame neural deblurring engine built on a Non-Linear Activation Free Network (NAFNet) architecture, optimized for the GoPro Large multi-scale video dataset.
+A deep learning framework designed to restore sharp video sequences from blurred frame streams. This repository implements a multi-frame neural deblurring engine built on a Non-Linear Activation Free Network (NAFNet). Beyond basic restoration, this module focuses on computational efficiency profiling, fault-tolerant training, and temporal attention visualization.
 
-## Performance Benchmark
+---
 
-| Metric | Target |
-|--------|--------|
-| Peak Signal-to-Noise Ratio (PSNR) | ≥ 27.00 dB |
+## Performance Benchmarks
+
+| Metric | Target / Configuration |
+|--------|------------------------|
+| Peak Signal-to-Noise Ratio (PSNR) | 30.12 dB |
 | Training frame triplets (GoPro) | 2,103 across 22 video segments |
 | Testing frame triplets (GoPro) | 1,111 across 22 video segments |
+| Profiling | GFLOPs, inference latency, Rate-Distortion curves |
 
 ---
 
 ## Architecture Design & Mechanics
 
-Video motion deblurring conventionally suffers from high computational overhead and the generation of hallucinatory spatial artifacts. This engine addresses these bottlenecks by utilizing an activation-free convolutional design that processes multiple temporal reference points concurrently.
+Video motion deblurring conventionally suffers from high computational overhead. This engine addresses these bottlenecks by utilizing an activation-free convolutional design that processes multiple temporal reference points concurrently.
 
 ### 1. Spatial-Temporal Context Ingestion
 
-The neural engine evaluates context sequences via an explicit frame-triplet model ($t-1$, $t$, $t+1$) to reconstruct a singular sharp frame map matching anchor step $t$.
+The neural engine evaluates context sequences via an explicit frame-triplet model ($t-1$, $t$, $t+1$).
 
 - **Tensor Aggregation:** Ingested images are concatenated directly along the channel dimension ($B \times 3C \times H \times W$) to pass global multi-frame boundary indicators into the primary encoder layers.
-- **Dynamic Padding Blocks:** To comply with deep U-Net downsampling pipelines without crop fragmentation, input tensors are symmetrically padded via feature reflections to match internal stride dividers (powers of $2^N$).
+- **Dynamic Padding Blocks:** Input tensors are symmetrically padded via feature reflections to match internal stride dividers (powers of $2^N$), ensuring artifact-free downsampling through the U-Net structure.
 
 ### 2. Non-Linear Activation Free Module (NAFNet)
 
-This pipeline removes traditional non-linear activation functions (such as ReLU, GeLU, or LeakyReLU) entirely, avoiding quantization risks and preserving raw floating-point pixel distributions:
+Removes traditional non-linear activation functions (ReLU, GeLU) entirely to preserve raw floating-point pixel distributions:
 
-- **Simple Gate Mechanics:** Replaces standard activation functions by splitting internal feature matrices into symmetrical channel pairs ($X_1, X_2$) and computing element-wise multiplication matrices ($X_1 \odot X_2$) inside normalized LayerNorm bounds.
-- **Simple Channel Attention (SCA):** A streamlined weighting layer that compresses global spatial descriptors down to single-channel vector averages, utilizing single $1 \times 1$ convolutions to efficiently adapt channel distributions.
+- **Simple Gate Mechanics:** Splits internal feature matrices into symmetrical channel pairs ($X_1, X_2$) and computes element-wise multiplication matrices ($X_1 \odot X_2$) inside normalized LayerNorm bounds.
+- **Simple Channel Attention (SCA):** Compresses global spatial descriptors down to single-channel vector averages using $1 \times 1$ convolutions to efficiently adapt channel distributions.
 
-```
-[Frame Triplet (t-1, t, t+1)] ──► Channel Concat (3xC) ──► Input Padding Block
-                                                                │
-  ┌─────────────────────────────────────────────────────────────┘
-  ▼
-[Encoder Blocks (Down)] ──► [Simple Gate / SCA Blocks] ──► [Decoder Blocks (Up)]
-                                                                │
-[Output Channel Mix] ◄── [Residual Frame Anchor (t) Addition] ◄─┘
-```
+---
+
+## Advanced Pipeline Features
+
+### Fault-Tolerant Training
+
+- **Atomic Checkpointing:** Safe state-saving (`save_checkpoint_atomic`) prevents weight corruption during unexpected runtime interruptions.
+- **Numeric Validation:** Real-time NaN/Inf gradient checking during the backward pass to catch gradient explosions instantly.
+- **Dynamic Monitoring:** Live Train/Validation PSNR plotting hooked directly into the evaluation loop.
+
+### Computational Profiling
+
+Includes an explicit profiling environment to evaluate deployment feasibility:
+
+- Extracts total model parameters and GFLOPs natively.
+- Benchmarks real-time inference latency across variable tensor sizes.
+- Generates Rate-Distortion (RD) curves plotting visual quality metrics (PSNR/SSIM) against computational expense.
+
+### Temporal Attention Visualization
+
+Features a custom 3D correlation visualization engine mapping cross-frame patch attention. By plotting high-correlation structural patches between the blur triplet and the target anchor, the framework provides an interpretable proxy for how the network tracks motion trajectories.
 
 ---
 
 ## Dataset Layout
 
-The pipeline consumes multi-channel target sequences natively from structured dataset directories:
+The pipeline consumes multi-channel target sequences from structured dataset directories:
 
 ```
 GoPro/
@@ -55,35 +70,30 @@ GoPro/
 └── test/
 ```
 
-During execution, data loader objects apply synchronized spatial augmentations — Random Crop matrices matching $256 \times 256$ dimensions and Horizontal Flips — consistently across all channels within the triplet structure to prevent temporal misalignment.
-
 ---
 
 ## Quickstart
 
 ### Prerequisites
 
-Configure your environment using the core machine learning and hardware-accelerated processing stack:
-
 ```bash
-conda install -c conda-forge pytorch torchvision albumentations opencv tqdm matplotlib
+conda install -c conda-forge pytorch torchvision albumentations opencv tqdm matplotlib thop
 ```
 
-### Model Evaluation
+> `thop` or `ptflops` is required for GFLOPs profiling.
 
-To evaluate a checkpoint against the test set:
+### Model Evaluation
 
 ```python
 import torch
 from torch.utils.data import DataLoader
-from deblur_core import UNet, NAFNetBlock, GoProDataset, evaluate
+from deblur_core import UNet, NAFNetBlock, GoProDataset, evaluate, check_numerics
 
-# Hardware mapping configuration
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # Initialize model
 model = UNet(block_type=NAFNetBlock).to(device)
-checkpoint = torch.load("./weights/deblur_checkpoint.pth", map_location=device)
+checkpoint = torch.load("./weights/deblur_checkpoint_atomic.pth", map_location=device)
 model.load_state_dict(checkpoint["model_state_dict"])
 
 # Stream test dataset
@@ -94,9 +104,3 @@ test_loader = DataLoader(test_dataset, batch_size=4, shuffle=False, num_workers=
 mean_psnr, mean_ssim = evaluate(model, test_loader, device)
 print(f"PSNR = {mean_psnr:.2f} dB, SSIM = {mean_ssim:.4f}")
 ```
-
----
-
-## Engineering Context
-
-This repository can operate as a standalone restoration framework or as a preprocessing module for downstream video analytics architectures. By filtering out sudden motion artifacts and exposure noise, it significantly stabilizes inter-frame sequences, preventing false positives in high-speed scene change detection and temporal tracking tasks.
